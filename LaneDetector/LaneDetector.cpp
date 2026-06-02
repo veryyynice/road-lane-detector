@@ -4,14 +4,17 @@
 LaneDetector::LaneDetector() {
     // We will likely need to adjust these after you see the red box on the screen!
     srcPoints = {
-        //cv::Point2f(757, 381),
-        //cv::Point2f(501, 371),
-        //cv::Point2f(4, 654),
-        //cv::Point2f(1222, 666),
-         cv::Point2f(513, 404),  // 1. Top-Left
-        cv::Point2f(739, 407),  // 2. Top-Right
-        cv::Point2f(5, 654),    // 3. Bottom-Left
-        cv::Point2f(1269, 661)  // 4. Bottom-Right
+
+
+        // cv::Point2f(513, 404),  // 1. Top-Left
+        //cv::Point2f(739, 407),  // 2. Top-Right
+        //cv::Point2f(5, 654),    // 3. Bottom-Left
+        //cv::Point2f(1269, 661)  // 4. Bottom-Right
+
+        cv::Point2f(371, 401),
+        cv::Point2f(744, 408),
+        cv::Point2f(7, 564),
+        cv::Point2f(1276, 571),
     };
 
     dstPoints = {
@@ -23,29 +26,159 @@ LaneDetector::LaneDetector() {
 }
 
 double LaneDetector::processFrame(cv::Mat& inputFrame, cv::Mat& debugView, cv::Mat& debugEdges) {
-    // 1. Get edges and output them to our new debug window
     cv::Mat edges = applyHSVMask(inputFrame);
     edges.copyTo(debugEdges);
 
-    // --- UPDATED: Draw the trapezoid without crossing the wires ---
-    // We manually push the points in a clockwise circle: 
-    // Top-Left (0) -> Top-Right (1) -> Bottom-Right (3) -> Bottom-Left (2)
+    // Draw the red trapezoid clockwise
     std::vector<cv::Point> intPoints;
     intPoints.push_back(cv::Point((int)srcPoints[0].x, (int)srcPoints[0].y));
     intPoints.push_back(cv::Point((int)srcPoints[1].x, (int)srcPoints[1].y));
-    intPoints.push_back(cv::Point((int)srcPoints[3].x, (int)srcPoints[3].y)); // Swap order here
-    intPoints.push_back(cv::Point((int)srcPoints[2].x, (int)srcPoints[2].y)); // Swap order here
-
-    // Draws a closed polygon with a thickness of 2
+    intPoints.push_back(cv::Point((int)srcPoints[3].x, (int)srcPoints[3].y));
+    intPoints.push_back(cv::Point((int)srcPoints[2].x, (int)srcPoints[2].y));
     cv::polylines(inputFrame, intPoints, true, cv::Scalar(0, 0, 255), 2);
 
-    // 2. Warp into Bird's Eye View
     cv::Mat warpedEdges = getBirdsEyeView(edges);
-    warpedEdges.copyTo(debugView);
 
-    // 3. Calculate how much the road is turning
-    return calculateCurveAngle(warpedEdges);
+    // --- NEW: Convert grayscale warped edges to BGR so we can draw colored boxes on it ---
+    cv::cvtColor(warpedEdges, debugView, cv::COLOR_GRAY2BGR);
+
+    // Pass the colored debugView into the curve calculator
+    return calculateCurveAngle(warpedEdges, debugView);
 }
+
+double LaneDetector::calculateCurveAngle(const cv::Mat& warpedEdges, cv::Mat& debugView) {
+    std::vector<cv::Point> nonZeroPts;
+    cv::findNonZero(warpedEdges, nonZeroPts);
+
+    std::vector<int> histogram(warpedEdges.cols, 0);
+    for (const auto& pt : nonZeroPts) {
+        if (pt.y > warpedEdges.rows / 2) {
+            histogram[pt.x]++;
+        }
+    }
+
+    // --- THE FIX: Ignore the outer 40 pixels where border artifacts live ---
+    int midPoint = warpedEdges.cols / 2;
+    int ignoreMargin = 40;
+
+    // Find Left Peak (search only from x=40 to x=200)
+    auto leftStart = histogram.begin() + ignoreMargin;
+    auto leftEnd = histogram.begin() + midPoint;
+    int leftBaseX = (int)std::distance(histogram.begin(), std::max_element(leftStart, leftEnd));
+
+    // Find Right Peak (search only from x=200 to x=360)
+    auto rightStart = histogram.begin() + midPoint;
+    auto rightEnd = histogram.end() - ignoreMargin;
+    int rightBaseX = (int)std::distance(histogram.begin(), std::max_element(rightStart, rightEnd));
+
+    // WIDENED WINDOWS: Increased margin to 50 to track sharper curves
+    int numWindows = 9;
+    int windowHeight = warpedEdges.rows / numWindows;
+    int margin = 50;
+    int minPix = 15;
+
+    int leftCurrentX = leftBaseX;
+    int rightCurrentX = rightBaseX;
+
+    std::vector<cv::Point> leftLanePts;
+    std::vector<cv::Point> rightLanePts;
+
+    for (int window = 0; window < numWindows; window++) {
+        int winY_top = warpedEdges.rows - (window + 1) * windowHeight;
+        int winY_bottom = warpedEdges.rows - window * windowHeight;
+
+        int winX_left_min = leftCurrentX - margin;
+        int winX_left_max = leftCurrentX + margin;
+        int winX_right_min = rightCurrentX - margin;
+        int winX_right_max = rightCurrentX + margin;
+
+        cv::rectangle(debugView, cv::Point(winX_left_min, winY_bottom), cv::Point(winX_left_max, winY_top), cv::Scalar(0, 255, 0), 2);
+        cv::rectangle(debugView, cv::Point(winX_right_min, winY_bottom), cv::Point(winX_right_max, winY_top), cv::Scalar(0, 0, 255), 2);
+
+        int leftPixCount = 0;
+        int leftPixSumX = 0;
+        int rightPixCount = 0;
+        int rightPixSumX = 0;
+
+        for (const auto& pt : nonZeroPts) {
+            if (pt.y >= winY_top && pt.y < winY_bottom) {
+                if (pt.x >= winX_left_min && pt.x < winX_left_max) {
+                    leftLanePts.push_back(pt);
+                    leftPixSumX += pt.x;
+                    leftPixCount++;
+                }
+                if (pt.x >= winX_right_min && pt.x < winX_right_max) {
+                    rightLanePts.push_back(pt);
+                    rightPixSumX += pt.x;
+                    rightPixCount++;
+                }
+            }
+        }
+
+        if (leftPixCount > minPix) leftCurrentX = leftPixSumX / leftPixCount;
+        if (rightPixCount > minPix) rightCurrentX = rightPixSumX / rightPixCount;
+    }
+
+    // 5. Fit Polynomials
+    if (leftLanePts.size() > 10 && rightLanePts.size() > 10) {
+        cv::Mat leftFit = polyfit(leftLanePts);
+        cv::Mat rightFit = polyfit(rightLanePts);
+
+        std::vector<cv::Point> leftCurve, rightCurve;
+        for (int y = 0; y < warpedEdges.rows; y += 5) {
+            double lX = leftFit.at<double>(0, 0) * y * y + leftFit.at<double>(1, 0) * y + leftFit.at<double>(2, 0);
+            double rX = rightFit.at<double>(0, 0) * y * y + rightFit.at<double>(1, 0) * y + rightFit.at<double>(2, 0);
+            leftCurve.push_back(cv::Point((int)lX, y));
+            rightCurve.push_back(cv::Point((int)rX, y));
+        }
+        cv::polylines(debugView, leftCurve, false, cv::Scalar(0, 255, 255), 3);
+        cv::polylines(debugView, rightCurve, false, cv::Scalar(0, 255, 255), 3);
+
+        // 6. Calculate Steering Angle (THE FIXED MATH)
+        // Evaluate the polynomial at the BOTTOM of the screen (where the car is)
+        int y_bottom = warpedEdges.rows;
+        double bottomLeftX = leftFit.at<double>(0, 0) * y_bottom * y_bottom + leftFit.at<double>(1, 0) * y_bottom + leftFit.at<double>(2, 0);
+        double bottomRightX = rightFit.at<double>(0, 0) * y_bottom * y_bottom + rightFit.at<double>(1, 0) * y_bottom + rightFit.at<double>(2, 0);
+        double bottomMidX = (bottomLeftX + bottomRightX) / 2.0;
+
+        // Evaluate the polynomial a quarter of the way down from the TOP
+        int y_top = warpedEdges.rows / 4;
+        double topLeftX = leftFit.at<double>(0, 0) * y_top * y_top + leftFit.at<double>(1, 0) * y_top + leftFit.at<double>(2, 0);
+        double topRightX = rightFit.at<double>(0, 0) * y_top * y_top + rightFit.at<double>(1, 0) * y_top + rightFit.at<double>(2, 0);
+        double topMidX = (topLeftX + topRightX) / 2.0;
+
+        // THE FIX: Swap the order to invert the angle!
+        // Now, a right turn (topMidX > bottomMidX) results in a negative angle.
+        // OpenCV turns clockwise for negative angles.
+        double shift = bottomMidX - topMidX;
+
+        return shift * 0.4;
+    }
+
+    return 0.0;
+}
+
+// Helper Function: Least Squares solver for x = Ay^2 + By + C
+cv::Mat LaneDetector::polyfit(const std::vector<cv::Point>& pts) {
+    // Cast to int once to silence the size_t warnings
+    int n = (int)pts.size();
+
+    cv::Mat X(n, 3, CV_64F);
+    cv::Mat Y(n, 1, CV_64F);
+
+    for (int i = 0; i < n; i++) {
+        X.at<double>(i, 0) = pts[i].y * pts[i].y;
+        X.at<double>(i, 1) = pts[i].y;
+        X.at<double>(i, 2) = 1.0;
+        Y.at<double>(i, 0) = pts[i].x;
+    }
+
+    cv::Mat coeffs;
+    cv::solve(X, Y, coeffs, cv::DECOMP_SVD);
+    return coeffs;
+}
+
+
 cv::Mat LaneDetector::applyHSVMask(const cv::Mat& frame) {
     cv::Mat hsv, whiteMask, yellowMask, finalMask, edges;
     cv::cvtColor(frame, hsv, cv::COLOR_BGR2HSV);
@@ -68,32 +201,3 @@ cv::Mat LaneDetector::getBirdsEyeView(const cv::Mat& edges) {
     return warped;
 }
 
-double LaneDetector::calculateCurveAngle(const cv::Mat& warpedEdges) {
-    int topSumX = 0, topCount = 0;
-    int bottomSumX = 0, bottomCount = 0;
-    int midY = warpedEdges.rows / 2;
-
-    for (int y = 0; y < warpedEdges.rows; y++) {
-        for (int x = 0; x < warpedEdges.cols; x++) {
-            if (warpedEdges.at<uchar>(y, x) > 128) {
-                if (y < midY) {
-                    topSumX += x;
-                    topCount++;
-                }
-                else {
-                    bottomSumX += x;
-                    bottomCount++;
-                }
-            }
-        }
-    }
-
-    if (topCount == 0 || bottomCount == 0) return 0.0;
-
-    int topAverageX = topSumX / topCount;
-    int bottomAverageX = bottomSumX / bottomCount;
-
-    double shiftX = topAverageX - bottomAverageX;
-    double sensitivity = 0.5;
-    return shiftX * sensitivity;
-}
