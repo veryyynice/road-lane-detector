@@ -2,6 +2,20 @@
 
 This is our final project for Computer Vision. The system processes a raw driving video, applies a perspective warp to generate a bird's-eye view, uses a sliding window polynomial fit to calculate the road curve, and dynamically turns a dashboard steering wheel.
 
+## Input Video
+
+The project expects a file named `car_driving_front.mp4` placed next to `main.cpp`. We use real Tesla front-facing dashcam footage as the input source.
+
+**Source video:** [Tesla Cam Raw 2024-04-24 front](https://www.youtube.com/watch?v=xbPUAb0EeQ4) (YouTube)
+
+**To download it as an MP4:**
+1. Go to https://cnvmp3.com/v54
+2. Paste the YouTube URL above and download as MP4
+3. Rename the file to `car_driving_front.mp4`
+4. Place it in the `LaneDetector/LaneDetector/` folder next to `main.cpp`
+
+Using real unedited dashcam footage (rather than a curated test clip) means the detector runs against actual road conditions: varying lighting, shadows, and lane markings.
+
 ## 🛠️ Visual Studio Setup Instructions for Teammates
 
 Because OpenCV relies on massive `.dll` (Dynamic Link Library) files, those files are too large for GitHub and are ignored by our `.gitignore`. You must link OpenCV and copy the `.dll` files manually on your machine.
