@@ -187,12 +187,18 @@ double LaneDetector::calculateCurveAngle(const cv::Mat& warpedEdges, cv::Mat& de
         // subtraction order matters: bottom - top gives positive for left curves,
         // negative for right curves. OpenCV rotates clockwise for negative angles, which
         // is correct — right curve should turn the wheel clockwise.
-        double shift = bottomMidX - topMidX;
+        double shift    = bottomMidX - topMidX;
+        double rawAngle = shift * 0.4;
 
-        return shift * 0.4; // scale down so the wheel doesn't spin too wildly
+        // EMA smoothing: blend the new raw angle toward the running estimate
+        // emaAlpha controls responsiveness vs smoothness — see LaneDetector.h to tune
+        emaAngle = emaAlpha * rawAngle + (1.0 - emaAlpha) * emaAngle;
+        return emaAngle;
     }
 
-    return 0.0; // no lanes found this frame
+    // no lanes found this frame — hold the last smoothed value instead of snapping to zero
+    // this prevents the wheel jerking back to center on briefly occluded frames
+    return emaAngle;
 }
 
 // polyfit
