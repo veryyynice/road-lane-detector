@@ -57,8 +57,10 @@ private:
     std::vector<cv::Point2f> srcPoints; // the 4 corners of the trapezoid ROI on the original frame
     std::vector<cv::Point2f> dstPoints; // the 4 corners of the flat 400x600 output rectangle
 
-    double emaAngle       = 0.0; // running smoothed angle estimate carried across frames
-    const double emaAlpha = 0.1; // EMA weight: 0.1 (glassy/slow) to 0.4 (snappy/responsive)
+    double emaAngle          = 0.0;   // running smoothed angle estimate carried across frames
+    bool   emaInit           = false; // set on first valid frame so we don't blend from 0
+    const double emaMinAlpha = 0.05;  // alpha floor: used when barely enough pixels to fit
+    const double emaMaxAlpha = 0.30;  // alpha ceiling: used at full confidence (~300 px per lane)
 
 public:
     // set to true from main to save all intermediate pipeline images on the next frame

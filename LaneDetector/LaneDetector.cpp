@@ -161,7 +161,29 @@ double LaneDetector::calculateCurveAngle(const cv::Mat& warpedEdges, cv::Mat& de
         cv::Mat leftFit  = polyfit(leftLanePts);
         cv::Mat rightFit = polyfit(rightLanePts);
 
-        // evaluate the polynomials at every y to draw the smooth curves
+        // --- SANITY CHECK ---
+        // before using the fits, verify they describe a believable pair of lane lines
+        // check 1: both polynomials must curve in the same direction
+        //   the A coefficient (y^2 term) controls curvature direction — positive curves one way,
+        //   negative the other. if they have opposite signs, one fit is wrong, reject both.
+        double leftA  = leftFit.at<double>(0, 0);
+        double rightA = rightFit.at<double>(0, 0);
+        bool sameDirection = (leftA * rightA) >= 0.0;
+
+        // check 2: lane width at the bottom must be believable
+        //   too narrow = the windows collapsed onto the same line
+        //   too wide = one window drifted off the road entirely
+        int y_bottom = warpedEdges.rows;
+        double bottomLeftX  = leftFit.at<double>(0, 0)  * y_bottom * y_bottom + leftFit.at<double>(1, 0)  * y_bottom + leftFit.at<double>(2, 0);
+        double bottomRightX = rightFit.at<double>(0, 0) * y_bottom * y_bottom + rightFit.at<double>(1, 0) * y_bottom + rightFit.at<double>(2, 0);
+        double laneWidth    = bottomRightX - bottomLeftX;
+        bool validWidth     = laneWidth > 100.0 && laneWidth < 380.0; // reasonable range in 400px wide view
+
+        bool sanityPass = sameDirection && validWidth;
+
+        // always draw the curves so the debug view shows what was detected this frame
+        // yellow = accepted by sanity check, orange = rejected
+        cv::Scalar curveColor = sanityPass ? cv::Scalar(0, 255, 255) : cv::Scalar(0, 100, 255);
         std::vector<cv::Point> leftCurve, rightCurve;
         for (int y = 0; y < warpedEdges.rows; y += 5) {
             double lX = leftFit.at<double>(0, 0)  * y * y + leftFit.at<double>(1, 0)  * y + leftFit.at<double>(2, 0);
@@ -169,14 +191,15 @@ double LaneDetector::calculateCurveAngle(const cv::Mat& warpedEdges, cv::Mat& de
             leftCurve.push_back(cv::Point((int)lX, y));
             rightCurve.push_back(cv::Point((int)rX, y));
         }
-        cv::polylines(debugView, leftCurve,  false, cv::Scalar(0, 255, 255), 3); // yellow
-        cv::polylines(debugView, rightCurve, false, cv::Scalar(0, 255, 255), 3);
+        cv::polylines(debugView, leftCurve,  false, curveColor, 3);
+        cv::polylines(debugView, rightCurve, false, curveColor, 3);
+
+        // if sanity fails, hold the last EMA value — don't corrupt it with a bad frame
+        if (!sanityPass)
+            return emaAngle;
 
         // steering angle: compare the lane midpoint near the car (bottom) vs far ahead (top quarter)
         // shift = how much the midpoint moves from bottom to top — positive means curving left
-        int y_bottom = warpedEdges.rows;
-        double bottomLeftX  = leftFit.at<double>(0, 0)  * y_bottom * y_bottom + leftFit.at<double>(1, 0)  * y_bottom + leftFit.at<double>(2, 0);
-        double bottomRightX = rightFit.at<double>(0, 0) * y_bottom * y_bottom + rightFit.at<double>(1, 0) * y_bottom + rightFit.at<double>(2, 0);
         double bottomMidX   = (bottomLeftX + bottomRightX) / 2.0;
 
         int y_top = warpedEdges.rows / 4;
@@ -190,9 +213,22 @@ double LaneDetector::calculateCurveAngle(const cv::Mat& warpedEdges, cv::Mat& de
         double shift    = bottomMidX - topMidX;
         double rawAngle = shift * 0.4;
 
-        // EMA smoothing: blend the new raw angle toward the running estimate
-        // emaAlpha controls responsiveness vs smoothness — see LaneDetector.h to tune
-        emaAngle = emaAlpha * rawAngle + (1.0 - emaAlpha) * emaAngle;
+        // --- CONFIDENCE-WEIGHTED EMA ---
+        // alpha scales with how many lane pixels were found — more pixels means a cleaner fit
+        // so we trust it more and update the estimate faster (higher alpha)
+        // normalized at 300 pixels per lane for full confidence; clamped at 1.0
+        double totalPixels = (double)leftLanePts.size() + (double)rightLanePts.size();
+        double confidence  = std::min(totalPixels / 600.0, 1.0);
+        double alpha       = emaMinAlpha + (emaMaxAlpha - emaMinAlpha) * confidence;
+
+        // first valid frame: set directly so we don't blend from 0
+        if (!emaInit) {
+            emaAngle = rawAngle;
+            emaInit  = true;
+        } else {
+            emaAngle = alpha * rawAngle + (1.0 - alpha) * emaAngle;
+        }
+
         return emaAngle;
     }
 
